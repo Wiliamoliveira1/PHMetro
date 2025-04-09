@@ -1,35 +1,89 @@
-#Codigo do phmetro
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 
+// Instância do conversor ADC ADS1115
 Adafruit_ADS1115 ads;
 
-// 🔹 Coeficientes calculados por regressão linear (3 pontos)
-#define PH_SLOPE  -9.928
-#define PH_INTERCEPT  43.64
+// Pinos I2C do ESP32-S3 (ajuste conforme sua fiação)
+#define I2C_SDA 6
+#define I2C_SCL 7
+
+// Constantes do sistema
+const float vRef = 5.0; // Tensão de referência real dos sensores
+const float ganho = 6.144; // Ganho do ADS1115 para tensão máxima de leitura ±6.144V
+
+// Coeficientes da curva de calibração do pH (quadrático)
+const float A = 6.2608;
+const float B = -58.0983;
+const float C = 136.6355;
+
+// Simulação de temperatura (ou substitua por sensor real)
+float temperatura = 25.0;
+
+// Função para converter leitura bruta para tensão
+float leituraParaTensao(int16_t leituraADC) {
+  return (leituraADC * ganho) / 32768.0; // ADS1115 é 15 bits com bipolaridade (±32768)
+}
 
 void setup() {
-    Serial.begin(115200);
-    Wire.begin(6, 7);  // SDA = GPIO6, SCL = GPIO7
+  Serial.begin(115200);
+  delay(1000);
 
-    if (!ads.begin()) {
-        Serial.println("Falha ao iniciar ADS1115!");
-        while (1);
-    }
+  // Inicializa barramento I2C personalizado
+  Wire.begin(I2C_SDA, I2C_SCL);
 
-    ads.setGain(GAIN_ONE);  // ±4.096V
+  // Inicializa o ADC
+  if (!ads.begin(0x48, &Wire)) {
+    Serial.println("⚠️ Falha ao inicializar ADS1115. Verifique a conexão.");
+    while (1);
+  }
+
+  ads.setGain(GAIN_TWOTHIRDS); // ±6.144V (default)
+
+  Serial.println("Sistema de Monitoramento de Qualidade da Água Iniciado.");
+  Serial.println("pH,Condutividade,Temperatura,Tensao_pH,Tensao_TDS");
 }
 
 void loop() {
-    int16_t adcValue = ads.readADC_SingleEnded(0);
-    float voltage = (adcValue * 4.096) / 32768.0;
+  // Leitura das tensões brutas nos canais do ADS1115
+  int16_t leituraPH_raw = ads.readADC_SingleEnded(0);   // A0 do ADS
+  int16_t leituraTDS_raw = ads.readADC_SingleEnded(1);  // A1 do ADS
 
-    float phValue = PH_SLOPE * voltage + PH_INTERCEPT;
+  // Conversão para tensão real (em volts)
+  float tensaoPH = leituraParaTensao(leituraPH_raw);
+  float tensaoTDS = leituraParaTensao(leituraTDS_raw);
 
-    Serial.print("ADC: "); Serial.print(adcValue);
-    Serial.print(" | Tensão: "); Serial.print(voltage, 4);
-    Serial.print(" V | pH: "); Serial.println(phValue, 2);
+  // Cálculo do valor de pH pela curva quadrática ajustada
+  float ph = A * tensaoPH * tensaoPH + B * tensaoPH + C;
 
-    delay(1000);
+  // Estimativa de condutividade (ajuste essa fórmula com base no sensor real)
+  float condutividade = (tensaoTDS / vRef) * 5.0;
+
+  // Verificação de calibração (opcional)
+  if (ph < 3.5 || ph > 10.5) {
+    Serial.println("⚠️ Verifique a calibração do sensor de pH!");
+  }
+
+  // Impressão de dados formatados
+  Serial.print("pH -> V: ");
+  Serial.print(tensaoPH, 3);
+  Serial.print(" V | pH: ");
+  Serial.println(ph, 2);
+
+  Serial.print("TDS -> V: ");
+  Serial.print(tensaoTDS, 3);
+  Serial.print(" V | Condutividade: ");
+  Serial.print(condutividade, 2);
+  Serial.println(" mS/cm");
+
+  // Saída em CSV: pH, condutividade, temperatura, tensão_pH, tensão_TDS
+  Serial.print("CSV: ");
+  Serial.print(ph, 2); Serial.print(",");
+  Serial.print(condutividade, 2); Serial.print(",");
+  Serial.print(temperatura, 1); Serial.print(",");
+  Serial.print(tensaoPH, 3); Serial.print(",");
+  Serial.println(tensaoTDS, 3);
+
+  delay(1000); // Espera 1 segundo
 }
