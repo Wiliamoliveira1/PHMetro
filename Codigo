@@ -2,34 +2,36 @@
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 
-Adafruit_ADS1115 ads;
-
+// --- Definições de pinos (I2C "DTS") ---
 #define I2C_SDA 6
 #define I2C_SCL 7
 
-const int PH_CHANNEL = 0;
-const int NUM_SAMPLES = 20;
-const float GAIN = 6.144;
-const float ADC_RESOLUTION = 32768.0;
+// --- Inicialização do ADS1115 ---
+Adafruit_ADS1115 ads;
+#define PH_CHANNEL 0      // Canal do pH
+#define DTS_CHANNEL 1     // Canal do sensor de condutividade
+#define NUM_SAMPLES 20
+#define GAIN 6.144
+#define ADC_RESOLUTION 32768.0
 
-// Variáveis de calibração
+// --- Variáveis de calibração ---
 float t4 = NAN, t7 = NAN, t10 = NAN;
+float a = 0, b = 0, c = 0;
+float k_condutividade = NAN; // mS/cm por volt
 bool calibrado = false;
 
-float a = 0, b = 0, c = 0;
-
+// --- Função para converter leitura ADC em tensão ---
 float leituraParaTensao(int16_t leituraADC) {
   return (leituraADC * GAIN) / ADC_RESOLUTION;
 }
 
+// --- Função para calcular os coeficientes da curva quadrática ---
 void calcularCoeficientes() {
-  // Usa os pontos (V, pH): (t4, 4), (t7, 7), (t10, 10)
   float x1 = t4, y1 = 4.0;
   float x2 = t7, y2 = 7.0;
   float x3 = t10, y3 = 10.0;
 
   float denom = (x1 - x2) * (x1 - x3) * (x2 - x3);
-
   a = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / denom;
   b = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1) + x1 * x1 * (y2 - y3)) / denom;
   c = (x2 * x3 * (x2 - x3) * y1 + x3 * x1 * (x3 - x1) * y2 + x1 * x2 * (x1 - x2) * y3) / denom;
@@ -37,67 +39,79 @@ void calcularCoeficientes() {
   calibrado = true;
 
   Serial.println("\n✅ Coeficientes de calibração atualizados:");
-  Serial.print("a = "); Serial.println(a, 5);
-  Serial.print("b = "); Serial.println(b, 5);
-  Serial.print("c = "); Serial.println(c, 5);
+  Serial.print("  a = "); Serial.println(a, 5);
+  Serial.print("  b = "); Serial.println(b, 5);
+  Serial.print("  c = "); Serial.println(c, 5);
 }
 
+// --- Função para converter tensão em pH usando os coeficientes ---
 float calcularPH(float tensao) {
   if (!calibrado) return -1;
-
   float pH = a * tensao * tensao + b * tensao + c;
-
-  if (pH < 0) pH = 0;
-  if (pH > 14) pH = 14;
-
-  return pH;
+  return constrain(pH, 0.0, 14.0);
 }
 
+// --- Setup ---
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Wire.begin(I2C_SDA, I2C_SCL);
 
+  Wire.begin(I2C_SDA, I2C_SCL);
   if (!ads.begin(0x48, &Wire)) {
-    Serial.println("⚠️ ADS1115 não encontrado.");
-    while (1);
+    Serial.println("⚠️ ADS1115 não encontrado. Verifique conexões.");
+    while (true);
   }
 
-  ads.setGain(GAIN_TWOTHIRDS);
-  Serial.println("🔧 Sistema de calibração interativo iniciado.");
-  Serial.println("Insira o sensor em uma solução e pressione:");
-  Serial.println("  ➤ 'A' para calibrar pH 4");
-  Serial.println("  ➤ 'B' para calibrar pH 7");
-  Serial.println("  ➤ 'C' para calibrar pH 10");
+  ads.setGain(GAIN_TWOTHIRDS); // ±6.144V
+
+  Serial.println("🔧 Sistema de calibração iniciado");
+  Serial.println("📌 Insira os sensores e pressione:");
+  Serial.println("    ➤ 'A' para calibrar com solução pH 4");
+  Serial.println("    ➤ 'B' para calibrar com solução pH 7");
+  Serial.println("    ➤ 'C' para calibrar com solução pH 10");
+  Serial.println("    ➤ 'D' para calibrar condutividade com 12,88 mS/cm");
 }
 
+// --- Loop principal ---
 void loop() {
-  int32_t somaLeitura = 0;
-
+  // Leitura média do canal de pH
+  int32_t somaPH = 0;
   for (int i = 0; i < NUM_SAMPLES; i++) {
-    somaLeitura += ads.readADC_SingleEnded(PH_CHANNEL);
+    somaPH += ads.readADC_SingleEnded(PH_CHANNEL);
     delay(10);
   }
+  float mediaADC = somaPH / float(NUM_SAMPLES);
+  float tensaoPH = leituraParaTensao(mediaADC);
 
-  float mediaADC = somaLeitura / float(NUM_SAMPLES);
-  float tensao = leituraParaTensao(mediaADC);
+  // Leitura do canal de condutividade (DTS)
+  int32_t somaDTS = 0;
+  for (int i = 0; i < NUM_SAMPLES; i++) {
+    somaDTS += ads.readADC_SingleEnded(DTS_CHANNEL);
+    delay(10);
+  }
+  float tensaoDTS = leituraParaTensao(somaDTS / float(NUM_SAMPLES));
 
-  // Checagem de comandos do usuário
+  // Checar comandos de calibração via Serial
   if (Serial.available()) {
     char cmd = Serial.read();
 
     if (cmd == 'A' || cmd == 'a') {
-      t4 = tensao;
-      Serial.print("✅ Calibração pH 4 registrada: ");
+      t4 = tensaoPH;
+      Serial.print("✅ pH 4 calibrado com tensão: ");
       Serial.print(t4, 4); Serial.println(" V");
     } else if (cmd == 'B' || cmd == 'b') {
-      t7 = tensao;
-      Serial.print("✅ Calibração pH 7 registrada: ");
+      t7 = tensaoPH;
+      Serial.print("✅ pH 7 calibrado com tensão: ");
       Serial.print(t7, 4); Serial.println(" V");
     } else if (cmd == 'C' || cmd == 'c') {
-      t10 = tensao;
-      Serial.print("✅ Calibração pH 10 registrada: ");
+      t10 = tensaoPH;
+      Serial.print("✅ pH 10 calibrado com tensão: ");
       Serial.print(t10, 4); Serial.println(" V");
+    } else if (cmd == 'D' || cmd == 'd') {
+      k_condutividade = 12.88 / tensaoDTS;
+      Serial.println("✅ Sensor de condutividade calibrado com solução padrão:");
+      Serial.print("   Tensão DTS: "); Serial.print(tensaoDTS, 4); Serial.println(" V");
+      Serial.print("   k = "); Serial.print(k_condutividade, 4); Serial.println(" mS/cm por Volt");
     }
 
     if (!isnan(t4) && !isnan(t7) && !isnan(t10)) {
@@ -105,16 +119,31 @@ void loop() {
     }
   }
 
-  Serial.print("Leitura média ADC: ");
+  // Exibir leitura atual
+  Serial.print("📏 pH → ADC: ");
   Serial.print(mediaADC);
   Serial.print(" | Tensão: ");
-  Serial.print(tensao, 3);
+  Serial.print(tensaoPH, 3);
+
   if (calibrado) {
-    float ph = calcularPH(tensao);
-    Serial.print(" V | pH: ");
-    Serial.println(ph, 2);
+    float ph = calcularPH(tensaoPH);
+    Serial.print(" | pH: ");
+    Serial.print(ph, 2);
   } else {
-    Serial.println(" V | ⚠️ Ainda não calibrado.");
+    Serial.print(" | ⚠️ Ainda não calibrado");
+  }
+
+  if (!isnan(k_condutividade)) {
+    float condutividade = k_condutividade * tensaoDTS;
+    Serial.print(" | DTS: ");
+    Serial.print(tensaoDTS, 3);
+    Serial.print(" V | Condutividade: ");
+    Serial.print(condutividade, 2);
+    Serial.println(" mS/cm");
+  } else {
+    Serial.print(" | DTS: ");
+    Serial.print(tensaoDTS, 3);
+    Serial.println(" V | ⚠️ DTS não calibrado.");
   }
 
   delay(3000);
