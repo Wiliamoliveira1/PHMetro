@@ -2,88 +2,120 @@
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 
-// Instância do conversor ADC ADS1115
 Adafruit_ADS1115 ads;
 
-// Pinos I2C do ESP32-S3 (ajuste conforme sua fiação)
 #define I2C_SDA 6
 #define I2C_SCL 7
 
-// Constantes do sistema
-const float vRef = 5.0; // Tensão de referência real dos sensores
-const float ganho = 6.144; // Ganho do ADS1115 para tensão máxima de leitura ±6.144V
+const int PH_CHANNEL = 0;
+const int NUM_SAMPLES = 20;
+const float GAIN = 6.144;
+const float ADC_RESOLUTION = 32768.0;
 
-// Coeficientes da curva de calibração do pH (quadrático)
-const float A = 6.2608;
-const float B = -58.0983;
-const float C = 136.6355;
+// Variáveis de calibração
+float t4 = NAN, t7 = NAN, t10 = NAN;
+bool calibrado = false;
 
-// Simulação de temperatura (ou substitua por sensor real)
-float temperatura = 25.0;
+float a = 0, b = 0, c = 0;
 
-// Função para converter leitura bruta para tensão
 float leituraParaTensao(int16_t leituraADC) {
-  return (leituraADC * ganho) / 32768.0; // ADS1115 é 15 bits com bipolaridade (±32768)
+  return (leituraADC * GAIN) / ADC_RESOLUTION;
+}
+
+void calcularCoeficientes() {
+  // Usa os pontos (V, pH): (t4, 4), (t7, 7), (t10, 10)
+  float x1 = t4, y1 = 4.0;
+  float x2 = t7, y2 = 7.0;
+  float x3 = t10, y3 = 10.0;
+
+  float denom = (x1 - x2) * (x1 - x3) * (x2 - x3);
+
+  a = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / denom;
+  b = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1) + x1 * x1 * (y2 - y3)) / denom;
+  c = (x2 * x3 * (x2 - x3) * y1 + x3 * x1 * (x3 - x1) * y2 + x1 * x2 * (x1 - x2) * y3) / denom;
+
+  calibrado = true;
+
+  Serial.println("\n✅ Coeficientes de calibração atualizados:");
+  Serial.print("a = "); Serial.println(a, 5);
+  Serial.print("b = "); Serial.println(b, 5);
+  Serial.print("c = "); Serial.println(c, 5);
+}
+
+float calcularPH(float tensao) {
+  if (!calibrado) return -1;
+
+  float pH = a * tensao * tensao + b * tensao + c;
+
+  if (pH < 0) pH = 0;
+  if (pH > 14) pH = 14;
+
+  return pH;
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
-
-  // Inicializa barramento I2C personalizado
   Wire.begin(I2C_SDA, I2C_SCL);
 
-  // Inicializa o ADC
   if (!ads.begin(0x48, &Wire)) {
-    Serial.println("⚠️ Falha ao inicializar ADS1115. Verifique a conexão.");
+    Serial.println("⚠️ ADS1115 não encontrado.");
     while (1);
   }
 
-  ads.setGain(GAIN_TWOTHIRDS); // ±6.144V (default)
-
-  Serial.println("Sistema de Monitoramento de Qualidade da Água Iniciado.");
-  Serial.println("pH,Condutividade,Temperatura,Tensao_pH,Tensao_TDS");
+  ads.setGain(GAIN_TWOTHIRDS);
+  Serial.println("🔧 Sistema de calibração interativo iniciado.");
+  Serial.println("Insira o sensor em uma solução e pressione:");
+  Serial.println("  ➤ 'A' para calibrar pH 4");
+  Serial.println("  ➤ 'B' para calibrar pH 7");
+  Serial.println("  ➤ 'C' para calibrar pH 10");
 }
 
 void loop() {
-  // Leitura das tensões brutas nos canais do ADS1115
-  int16_t leituraPH_raw = ads.readADC_SingleEnded(0);   // A0 do ADS
-  int16_t leituraTDS_raw = ads.readADC_SingleEnded(1);  // A1 do ADS
+  int32_t somaLeitura = 0;
 
-  // Conversão para tensão real (em volts)
-  float tensaoPH = leituraParaTensao(leituraPH_raw);
-  float tensaoTDS = leituraParaTensao(leituraTDS_raw);
-
-  // Cálculo do valor de pH pela curva quadrática ajustada
-  float ph = A * tensaoPH * tensaoPH + B * tensaoPH + C;
-
-  // Estimativa de condutividade (ajuste essa fórmula com base no sensor real)
-  float condutividade = (tensaoTDS / vRef) * 5.0;
-
-  // Verificação de calibração (opcional)
-  if (ph < 3.5 || ph > 10.5) {
-    Serial.println("⚠️ Verifique a calibração do sensor de pH!");
+  for (int i = 0; i < NUM_SAMPLES; i++) {
+    somaLeitura += ads.readADC_SingleEnded(PH_CHANNEL);
+    delay(10);
   }
 
-  // Impressão de dados formatados
-  Serial.print("pH -> V: ");
-  Serial.print(tensaoPH, 3);
-  Serial.print(" V | pH: ");
-  Serial.println(ph, 2);
+  float mediaADC = somaLeitura / float(NUM_SAMPLES);
+  float tensao = leituraParaTensao(mediaADC);
 
-  Serial.print("TDS -> V: ");
-  Serial.print(tensaoTDS, 3);
-  Serial.print(" V | Condutividade: ");
-  Serial.print(condutividade, 2);
-  Serial.println(" mS/cm");
+  // Checagem de comandos do usuário
+  if (Serial.available()) {
+    char cmd = Serial.read();
 
-  // Saída em CSV: pH, condutividade, temperatura, tensão_pH, tensão_TDS
-  Serial.print("CSV: ");
-  Serial.print(ph, 2); Serial.print(",");
-  Serial.print(condutividade, 2); Serial.print(",");
-  Serial.print(temperatura, 1); Serial.print(",");
-  Serial.print(tensaoPH, 3); Serial.print(",");
-  Serial.println(tensaoTDS, 3);
+    if (cmd == 'A' || cmd == 'a') {
+      t4 = tensao;
+      Serial.print("✅ Calibração pH 4 registrada: ");
+      Serial.print(t4, 4); Serial.println(" V");
+    } else if (cmd == 'B' || cmd == 'b') {
+      t7 = tensao;
+      Serial.print("✅ Calibração pH 7 registrada: ");
+      Serial.print(t7, 4); Serial.println(" V");
+    } else if (cmd == 'C' || cmd == 'c') {
+      t10 = tensao;
+      Serial.print("✅ Calibração pH 10 registrada: ");
+      Serial.print(t10, 4); Serial.println(" V");
+    }
 
-  delay(1000); // Espera 1 segundo
+    if (!isnan(t4) && !isnan(t7) && !isnan(t10)) {
+      calcularCoeficientes();
+    }
+  }
+
+  Serial.print("Leitura média ADC: ");
+  Serial.print(mediaADC);
+  Serial.print(" | Tensão: ");
+  Serial.print(tensao, 3);
+  if (calibrado) {
+    float ph = calcularPH(tensao);
+    Serial.print(" V | pH: ");
+    Serial.println(ph, 2);
+  } else {
+    Serial.println(" V | ⚠️ Ainda não calibrado.");
+  }
+
+  delay(3000);
 }
